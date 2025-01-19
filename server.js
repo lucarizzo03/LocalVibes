@@ -17,7 +17,7 @@ const PORT = process.env.PORT || 4000;
 const clientID = '71f486a79e86416393b429a291edd6f6';
 const secretID = '6eccafb116364980bff02eeed75c9a5a';
 
-// get this explained
+
 app.use(
   session({
     store: new MemoryStore({
