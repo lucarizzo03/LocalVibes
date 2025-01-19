@@ -1,7 +1,10 @@
 const express = require('express');
+const axios = require('axios')
 const database = require("./database");
-const parse = require('body-parser');
+
 const session = require('express-session');
+const MemoryStore = require('memorystore')(session);
+
 const bcrypt = require('bcrypt');
 const spotifyFile = require('./spotify');
 const querystring = require('querystring');
@@ -11,21 +14,38 @@ const cors = require('cors');
 const app = express();
 const PORT = process.env.PORT || 4000;
 
-app.use(parse.json()); // parsing the POST reqs coming in 
+const clientID = '71f486a79e86416393b429a291edd6f6';
+const secretID = '6eccafb116364980bff02eeed75c9a5a';
 
-app.use(parse.urlencoded({ extended: true })); // converts POST data to use req.body
-
-app.use(session({
-    secret: process.env.seshKey || 'key', 
-    resave: false, // keep this false so it doesnt save if nothing was changed, performance reasons -> too much saving 
-    saveUninitialized: true // saving a new session, but that is not modified
-})); // used so we can store user-specific info 
+// get this explained
+app.use(
+  session({
+    store: new MemoryStore({
+      checkPeriod: 86400000, // Prune expired entries every 24h
+    }),
+    secret: '6eccafb116364980bff02eeed75c9a5a', // Replace with a secure key
+    resave: false, // Prevent unnecessary session saves
+    saveUninitialized: true, // Save unmodified sessions
+    cookie: {
+      secure: false, // Set to true in production with HTTPS
+      httpOnly: true, // Prevent access via client-side scripts
+      maxAge: 3600000, // Example: 1 hour session expiration
+    },
+  })
+);
 
 app.use(cors({
-  origin: 'http://localhost:3000',
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],  // Allowing these HTTP methods
-  allowedHeaders: ['Content-Type', 'Authorization'],  // Allowed headers
-})); // allows comms between backend and frontend 
+  origin: 'http://localhost:3000', // Frontend origin
+  credentials: true, // Allow cookies to be sent
+  allowedHeaders: ['Content-Type', 'Authorization'], // Allow necessary headers
+  methods: ['GET', 'POST'], // Specify allowed methods
+}));
+
+app.use(express.json());  // Parse JSON bodies
+app.use(express.urlencoded({ extended: true }));
+
+
+
 
 // Function to generate a random string for state parameter
 function generateRandomString(length) {
@@ -38,29 +58,28 @@ function generateRandomString(length) {
 
     return text;
 }
-
-const client = '71f486a79e86416393b429a291edd6f6';
-const secret = '6eccafb116364980bff02eeed75c9a5a';
+    
 
 // spotify login - FROM SPOTIFY
 app.get('/login', function(req, res) {
 
     var state = generateRandomString(16);
-    var scope = 'user-read-private user-read-email';
+    var scope = 'playlist-modify-public user-library-read user-read-private user-read-email';
   
     res.redirect('https://accounts.spotify.com/authorize?' +
       querystring.stringify({
         response_type: 'code',
-        client_id: client,
+        client_id: '71f486a79e86416393b429a291edd6f6',
         scope: scope,
         redirect_uri: 'http://localhost:4000/callback',
+        show_dialog: true,
         state: state
       }));
   });
-
+ 
     
-  // call back func - FROM SPOTIFY
   app.get('/callback', function(req, res) {
+
     var code = req.query.code || null;
     var state = req.query.state || null;
   
@@ -79,30 +98,116 @@ app.get('/login', function(req, res) {
         },
         headers: {
           'content-type': 'application/x-www-form-urlencoded',
-          'Authorization': 'Basic ' + (new Buffer.from(client + ':' + secret).toString('base64'))
+          'Authorization': 'Basic ' + (new Buffer.from(clientID + ':' + secretID).toString('base64'))
         },
         json: true
       };
-
-
-      request.post(authOptions, function (error, response, body) {
-        if (!error && response.statusCode === 200) {
-          const accessToken = body.access_token;
-          const refreshToken = body.refresh_token;
-
-          res.redirect(`http://localhost:3000/musicLog`);
-
-
-        }
-         else {
-          console.error('Error during token exchange:', error);
-          res.send(`
-            <h1>Login Failed</h1>
-            <p>Check server logs for details.</p>
-          `);
-        }
-      });
     }
+
+    request.post(authOptions, function(error, response, body) {
+      if (!error && response.statusCode === 200) {
+          const access_token = body.access_token;
+          const refresh_token = body.refresh_token;
+          const expires_in = body.expires_in;
+
+          console.log(access_token);
+          console.log(refresh_token);
+          console.log(expires_in);
+
+          console.log("DID shit print");
+         
+
+          // Save tokens in session
+          req.session.access_token = access_token;
+          req.session.refresh_token = refresh_token;
+          req.session.expires_in = Date.now() + expires_in * 1000;
+
+          req.session.save((err) => {
+            if (err) {
+                console.error('Error saving session:', err);
+            } else {
+                console.log('Session saved successfully');
+            }
+          });
+
+          console.log('TOKEN',req.session.access_token);         
+     
+          console.log(req.session)
+
+
+          const userOptions = {
+            url: 'https://api.spotify.com/v1/me',
+            headers: {
+              Authorization: `Bearer ${access_token}`,
+            },
+            json: true,
+          };
+  
+          request.get(userOptions, function (err, resp, userBody) {
+            if (!err && resp.statusCode === 200) {
+              const user_id = userBody.id; // Spotify User ID
+              console.log('Spotify User ID:', user_id);
+  
+              
+              req.session.user_id = user_id;
+  
+              req.session.save((err) => {
+                if (err) {
+                  console.error('Error saving user_id to session:', err);
+                } else {
+                  console.log('User ID saved successfully to session.');
+                }
+              });
+
+
+              console.log("USER ID", req.session.user_id);
+  
+            } else {
+              console.error('Error fetching user profile:', err || resp.statusCode);
+              res.redirect(
+                '/#' +
+                  querystring.stringify({
+                    error: 'user_profile_fetch_failed',
+                  })
+              );
+            }
+          });
+
+
+          res.redirect('http://localhost:3000/musicLog'); 
+      } else {
+          res.redirect('/#' + querystring.stringify({ error: 'invalid_token' }));
+      }
+    });
+  });
+
+
+  app.get('/refresh_token', function(req, res) {
+
+    var refresh_token = req.query.refresh_token;
+    var authOptions = {
+      url: 'https://accounts.spotify.com/api/token',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        'Authorization': 'Basic ' + (new Buffer.from(clientID + ':' + secretID).toString('base64'))
+      },
+      form: {
+        grant_type: 'refresh_token',
+        refresh_token: refresh_token
+      },
+      json: true
+    };
+  
+    request.post(authOptions, function(error, response, body) {
+      if (!error && response.statusCode === 200) {
+        var access_token = body.access_token,
+            refresh_token = body.refresh_token || refresh_token;
+        res.send({
+          'access_token': access_token,
+          'refresh_token': refresh_token
+        });
+      }
+    });
   });
 
 
@@ -159,20 +264,81 @@ app.post('/api/login', (req, res) => {
 })
 
 
+
+
 // function tp call spotify func randoSong to generate a rando rec song from user's account
 app.get('/genSong', async (req, res) => {
   console.log('Received request for genSong'); 
-  try {
-    const song = await spotifyFile.randoSong();
+  let x = req.session.access_token;
+  console.log("Access token from session:", x);
+  console.log('GENSONG USER ID', req.session.user_id)
 
-    if (song) {
-      console.log("gen succsess")
-      res.json(song);
-    }
-    else {
-      console.log("gen failed")
-      res.status(500).json({ message: 'Error fetching song' });
-    }
+  
+  if (!req.session.access_token) {
+    console.log("shit failed")
+    return res.redirect('http://localhost:4000/login');
+  }
+    
+  console.log("after req check")
+
+  if (Date.now() > req.session.expires_in) {
+    console.log('Access token has expired. Redirecting to refresh token...');
+    return res.redirect('http://localhost:4000/refresh_token');  
+  }
+
+
+  try {
+      console.log("in try")
+
+      const response = await axios.get('https://api.spotify.com/v1/me/tracks', {
+        headers: {
+            'Authorization': `Bearer ${req.session.access_token}`
+        },
+
+        params: {
+            limit: 1,
+            market: 'US'    
+        } 
+    }); 
+
+    const totalTracks = response.data.total;
+
+    if (!totalTracks) {
+        throw new Error('No tracks found in the response.'); 
+    } 
+
+    let track = Math.floor(Math.random() * totalTracks);
+
+    const responseTwo = await axios.get('https://api.spotify.com/v1/me/tracks', {
+      headers: {
+          'Authorization': `Bearer ${req.session.access_token}`
+      },
+
+      params: {
+          limit: 1,
+          offset: track,
+          market: 'US' 
+      } 
+    });
+
+    const song = responseTwo.data.items && responseTwo.data.items[0].track;
+
+    if (!song) {
+      throw new Error('No song found in the response.'); 
+    } 
+
+    const id = song.id;
+    const title = song.name;
+    const artist = song.artists[0].name;  
+    const albumCoverUrl = song.album.images[0].url;  
+    const sound = song.preview_url;
+
+    console.log("got song", title);
+    console.log(artist)
+    console.log(albumCoverUrl);
+    console.log(sound);
+
+    res.json({id, title, artist, albumCoverUrl, sound});
   }
   catch(error) {
     console.log('Error in genSong:', error);
@@ -181,48 +347,77 @@ app.get('/genSong', async (req, res) => {
 });
 
 
-// user favorites -> will add the user's favorite artist to their list 
-app.post('/api/favorites', async (req, res) => {
-    const { artistName } = req.body;
 
-    if (!req.session.user) {
-        return res.status(401).send('Not logged in');
+// creates user the spotify playlist 
+app.post('/playlist', async (req, res) => {
+
+  console.log('PLAYLIST USER', req.session.user_id, req.session.access_token);
+
+  try {
+    if (!req.session.user_id) {
+      throw new Error('NO USER ID FAILED PLAYLIST')
     }
 
-    if (!artistName) {
-        return res.status(400).send('Need artist name');
+    console.log("GETS HERE")
+  
+    const response = await axios.post(
+      `https://api.spotify.com/v1/users/${req.session.user_id}/playlists`,
+      {
+        name: 'MUSICSWIPE PLAYLIST', 
+        public: true,               
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${req.session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    req.session.playlist_id = response.data.id;
+    console.log('Playlist created with ID:', req.session.playlist_id);
+
+    res.status(200).json(response.d);
+
+  }
+  catch (err) {
+    console.error('Error creating playlist:', err.message);
+    console.error('Full error object:', err);
+  }
+
+})
+
+
+// add song to playlist 
+app.post('/addPlaylist', async (req, res) => {
+  try {
+
+    if (!req.session.playlist_id) {
+      throw new Error('No PLAYLIST ID')
     }
 
-    const userID = req.session.user.id;
+    const songID = req.body.songId;
 
-    const query = 'INSERT INTO favorites (user_id, artistName) VALUES (?, ?)';
+    const response = await axios.post(`https://api.spotify.com/v1/playlists/${req.session.playlist_id}/tracks`, 
+      {
+        uris: [`spotify:track:${songID}`],
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${req.session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    )
 
-    database.query(query, [userID, artistName], (err) => {
-        if (err) {
-            return res.status(500).send('Error adding to favorites.');
-        }
-        res.send('Artist added to favorites!');
-    })
+   console.log('added song')
+   res.status(200).json(response.data);
+  }
+  catch (err) {
+    console.log(err);
+  }
+})
 
-});
-
-
-
-// fucntion that calls create playlist - GET
-
-
-
-
-
-// user logout 
-app.post('/logout', (req, res) => {
-    req.session.destroy(err => {
-        if (err) {
-            return res.status(500).send('Error logging out');
-        }
-        res.send('Logged out');
-    });
-});
 
 
 app.listen(PORT, () => {
