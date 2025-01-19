@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import './musicSwipeLog.css'
 
 function MusicLog() {
    const [formData, setFormData] = useState({
@@ -40,7 +41,7 @@ function MusicLog() {
             const data = await response.json();
 
             if (data.message === 'Bro is logged in') {
-                alert('Login successful!');
+                alert('Bro Logged IN');
                 window.location.href = '/musicDash';
             } else {
                 setError(data.message || 'Login failed.');
